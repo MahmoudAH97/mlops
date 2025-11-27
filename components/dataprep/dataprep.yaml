@@ -1,0 +1,22 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+name: dataprep
+version: 2
+display_name: Data Preparation Component
+type: command
+
+code: .
+
+environment: azureml:pillow-env:1
+
+inputs:
+  data_folder:
+    type: uri_folder
+
+outputs:
+  output_folder:
+    type: uri_folder
+
+command: >-
+  python dataprep.py
+  --data_folder ${{inputs.data_folder}}
+  --output_folder ${{outputs.output_folder}}

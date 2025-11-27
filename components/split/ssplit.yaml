@@ -1,0 +1,28 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+name: split
+version: 2
+display_name: Train/Test Split Component
+type: command
+
+code: .
+
+environment: azureml:pillow-env:1
+
+inputs:
+  input_folder:
+    type: uri_folder
+  split_ratio:
+    type: number
+
+outputs:
+  train_folder:
+    type: uri_folder
+  test_folder:
+    type: uri_folder
+
+command: >-
+  python split.py
+  --input_folder ${{inputs.input_folder}}
+  --train_folder ${{outputs.train_folder}}
+  --test_folder ${{outputs.test_folder}}
+  --ratio ${{inputs.split_ratio}}

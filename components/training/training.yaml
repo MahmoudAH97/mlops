@@ -1,0 +1,28 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+name: training
+version: 2
+display_name: CNN Training Component
+type: command
+
+code: .
+
+environment: azureml:tensorflow-env:1
+
+inputs:
+  train_folder:
+    type: uri_folder
+  test_folder:
+    type: uri_folder
+  epochs:
+    type: number
+
+outputs:
+  model_output:
+    type: uri_folder
+
+command: >-
+  python training.py
+  --train_folder ${{inputs.train_folder}}
+  --test_folder ${{inputs.test_folder}}
+  --epochs ${{inputs.epochs}}
+  --model_output ${{outputs.model_output}}

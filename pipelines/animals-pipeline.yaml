@@ -1,0 +1,50 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+
+type: pipeline
+name: animals-pipeline
+display_name: Animals Classification Pipeline
+experiment_name: animals-exp
+
+inputs:
+  split_ratio: 0.2
+  epochs: 5
+
+outputs:
+  trained_model:
+    type: uri_folder
+    mode: upload
+
+settings:
+  default_compute: azureml:cpu-cluster
+
+jobs:
+  prep:
+    type: command
+    component: ../components/dataprep/dataprep.yaml
+    inputs:
+      data_folder: azureml:animal-dataset:1
+    outputs:
+      output_folder:
+        mode: rw_mount
+
+  split:
+    type: command
+    component: ../components/split/ssplit.yaml
+    inputs:
+      input_folder: ${{ parent.jobs.prep.outputs.output_folder }}
+      split_ratio: ${{ parent.inputs.split_ratio }}
+    outputs:
+      train_folder:
+        mode: rw_mount
+      test_folder:
+        mode: rw_mount
+
+  train:
+    type: command
+    component: ../components/training/training.yaml
+    inputs:
+      train_folder: ${{ parent.jobs.split.outputs.train_folder }}
+      test_folder: ${{ parent.jobs.split.outputs.test_folder }}
+      epochs: ${{ parent.inputs.epochs }}
+    outputs:
+      model_output: ${{ parent.outputs.trained_model }}

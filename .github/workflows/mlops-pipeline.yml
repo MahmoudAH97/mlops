@@ -1,0 +1,143 @@
+name: MLOps End-to-End Pipeline
+
+on:
+  workflow_dispatch:
+
+env:
+  GROUP: mlops
+  WORKSPACE: mlops-ws
+  LOCATION: westeurope
+  MODEL_NAME: animal-classification
+  ACR_LOGIN: nimaacrregistry.azurecr.io
+
+jobs:
+  azure-pipeline:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Azure ML Extension
+        run: az extension add -n ml -y
+
+      - name: Azure – Configure Defaults
+        run: az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+
+      - name: Azure – Create Compute
+        run: az ml compute create --file environment/compute.yaml
+
+      - name: Azure – Start Compute (safe)
+        continue-on-error: true
+        run: |
+          STATE=$(az ml compute show --name cpu-cluster --query "state" -o tsv)
+          if [ "$STATE" = "Stopped" ]; then
+            az ml compute start --name cpu-cluster
+          else
+            echo "Compute already running"
+          fi
+
+      - name: Azure – Register Environments
+        run: |
+          az ml environment create --file environment/pillow-env.yaml
+          az ml environment create --file environment/tensorflow-env.yaml
+
+      - name: Azure – Register Components
+        run: |
+          az ml component create --file components/dataprep/dataprep.yaml
+          az ml component create --file components/split/ssplit.yaml
+          az ml component create --file components/training/training.yaml
+
+      - name: Azure – Run Training Pipeline
+        run: |
+          az ml job create \
+            --file pipelines/animals-pipeline.yaml \
+            --stream \
+            --set name=animals-pipeline-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Azure – Stop Compute
+        continue-on-error: true
+        run: az ml compute stop --name cpu-cluster
+
+  download:
+    needs: azure-pipeline
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Azure ML Extension
+        run: az extension add -n ml -y
+
+      - name: Azure – Configure Defaults
+        run: az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+
+      - name: Azure – Download Model
+        run: |
+          VERSION=$(az ml model list -n $MODEL_NAME --query "[0].version" -o tsv)
+          echo "Downloading model version $VERSION"
+          az ml model download \
+            --name $MODEL_NAME \
+            --version $VERSION \
+            --download-path model_output \
+            --overwrite
+
+      - name: Upload Inference Code
+        uses: actions/upload-artifact@v4.3.3
+        with:
+          name: inference-artifact
+          path: inference
+
+  deploy:
+    needs: download
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Inference Artifact
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: inference-artifact
+          path: inference
+
+      - name: Docker – Meta
+        id: meta
+        uses: docker/metadata-action@v5.5.1
+        with:
+          images: |
+            ghcr.io/MahmoudAH97/mlops-animals-api
+          tags: |
+            type=ref,event=branch
+            type=sha
+
+      - name: GHCR Login
+        uses: docker/login-action@v3.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker Build + Push
+        uses: docker/build-push-action@v5.3.0
+        with:
+          context: ./inference
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Kubernetes Deploy
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml

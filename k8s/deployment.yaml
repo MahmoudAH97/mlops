@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: animals-api
+  labels:
+    app: animals-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: animals-api
+  template:
+    metadata:
+      labels:
+        app: animals-api
+    spec:
+      containers:
+      - name: animals-api
+        image: ghcr.io/mahmoudah97/mlops-animals-api:latest
+        ports:
+        - containerPort: 80
