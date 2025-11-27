@@ -2,7 +2,7 @@ name: MLOps End-to-End Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
@@ -11,12 +11,16 @@ env:
   ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
   ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
 
+  # Storage secret (connection string)
+  AZURE_BLOB_CONNECTION_STRING: ${{ secrets.AZURE_BLOB_CONNECTION_STRING }}
+
+  # Image name
   IMAGE_NAME: animal-inference
 
 jobs:
 
   # ======================================================
-  # 1. TRAIN MODEL LOCALLY – download dataset from Azure Blob
+  # 1. TRAIN MODEL LOCALLY IN GITHUB ACTIONS
   # ======================================================
   train:
     runs-on: ubuntu-latest
@@ -25,9 +29,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ----------------------------------------
+      # Install Azure CLI (correct action)
+      # ----------------------------------------
       - name: Install Azure CLI
-        uses: azure/CLI@v1
+        uses: actions/azure-cli@v2
 
+      # ----------------------------------------
+      # Download dataset from Azure Blob
+      # ----------------------------------------
       - name: Download dataset from Azure Blob
         env:
           AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_BLOB_CONNECTION_STRING }}
@@ -43,6 +53,9 @@ jobs:
           echo "Download complete. Files:"
           ls -R data/raw
 
+      # ----------------------------------------
+      # Python setup + dependencies
+      # ----------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -53,6 +66,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install pillow tensorflow scikit-learn
 
+      # ----------------------------------------
+      # Run ML pipeline
+      # ----------------------------------------
       - name: Run ML pipeline (dataprep → split → training)
         run: |
           python components/dataprep/dataprep.py \
@@ -71,6 +87,9 @@ jobs:
             --epochs 3 \
             --model_output model_output
 
+      # ----------------------------------------
+      # Upload trained model
+      # ----------------------------------------
       - name: Upload trained model for next job
         uses: actions/upload-artifact@v4
         with:
@@ -107,7 +126,7 @@ jobs:
           docker push $ACR_LOGIN/$IMAGE_NAME:latest
 
   # ======================================================
-  # 3. DEPLOY TO AKS USING KUBECONFIG (NO AZ LOGIN REQUIRED)
+  # 3. DEPLOY TO AKS USING KUBECONFIG
   # ======================================================
   deploy:
     runs-on: ubuntu-latest
@@ -127,7 +146,7 @@ jobs:
           echo "${{ secrets.AKS_KUBECONFIG }}" > kubeconfig
           chmod 600 kubeconfig
 
-      - name: Patch deployment image
+      - name: Update deployment image
         run: |
           sed -i "s|IMAGE_PLACEHOLDER|${{ env.ACR_LOGIN }}/${{ env.IMAGE_NAME }}:latest|g" k8s/deployment.yaml
 
@@ -136,7 +155,7 @@ jobs:
           KUBECONFIG=kubeconfig kubectl apply -f k8s/deployment.yaml
           KUBECONFIG=kubeconfig kubectl apply -f k8s/service.yaml
 
-      - name: Verify deployment
+      - name: Verify Deployment
         run: |
           KUBECONFIG=kubeconfig kubectl get pods -o wide
           KUBECONFIG=kubeconfig kubectl get svc -o wide
