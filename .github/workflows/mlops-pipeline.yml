@@ -11,14 +11,10 @@ env:
   ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
   ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
 
-  # Image name
   IMAGE_NAME: animal-inference
 
 jobs:
 
-  # ======================================================
-  # 1. TRAIN MODEL LOCALLY IN GITHUB ACTIONS
-  # ======================================================
   train:
     runs-on: ubuntu-latest
 
@@ -36,21 +32,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install pillow tensorflow scikit-learn
 
-      - name: Run ML pipeline (dataprep → split → training)
+      # ---------------------------
+      # 1. Data Preparation
+      # ---------------------------
+      - name: Run data preparation
         run: |
-          python components/dataprep/dataprep.py
-          python components/split/split.py
-          python components/training/training.py
+          python components/dataprep/dataprep.py \
+            --data_folder data/raw \
+            --output_folder data/processed
 
-      - name: Upload trained model for next job
+      # ---------------------------
+      # 2. Train/Test Split
+      # ---------------------------
+      - name: Run data split
+        run: |
+          python components/split/split.py \
+            --input_folder data/processed \
+            --train_folder data/split/train \
+            --test_folder data/split/test \
+            --ratio 0.8
+
+      # ---------------------------
+      # 3. Training
+      # ---------------------------
+      - name: Run model training
+        run: |
+          python components/training/training.py \
+            --train_folder data/split/train \
+            --test_folder data/split/test \
+            --epochs 3 \
+            --model_output model_output
+
+      - name: Upload trained model
         uses: actions/upload-artifact@v4
         with:
           name: trained-model
           path: model_output/model.h5
 
-  # ======================================================
-  # 2. BUILD & PUSH DOCKER IMAGE TO ACR
-  # ======================================================
   build:
     runs-on: ubuntu-latest
     needs: train
@@ -77,9 +95,6 @@ jobs:
         run: |
           docker push $ACR_LOGIN/$IMAGE_NAME:latest
 
-  # ======================================================
-  # 3. DEPLOY TO AKS USING KUBECONFIG (NO AZ LOGIN)
-  # ======================================================
   deploy:
     runs-on: ubuntu-latest
     needs: build
@@ -100,7 +115,6 @@ jobs:
 
       - name: Update deployment image
         run: |
-          # Replace image name in deployment.yaml
           sed -i "s|IMAGE_PLACEHOLDER|${{ env.ACR_LOGIN }}/${{ env.IMAGE_NAME }}:latest|g" k8s/deployment.yaml
 
       - name: Apply Kubernetes manifests
