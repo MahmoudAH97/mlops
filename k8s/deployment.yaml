@@ -1,21 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: animals-api
-  labels:
-    app: animals-api
+  name: animals-inference
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: animals-api
+      app: animals-inference
   template:
     metadata:
       labels:
-        app: animals-api
+        app: animals-inference
     spec:
       containers:
-      - name: animals-api
-        image: ghcr.io/mahmoudah97/mlops-animals-api:latest
+      - name: animals-inference
+        image: IMAGE_PLACEHOLDER
         ports:
-        - containerPort: 80
+        - containerPort: 5000

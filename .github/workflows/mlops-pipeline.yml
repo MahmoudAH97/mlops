@@ -1,143 +1,114 @@
 name: MLOps End-to-End Pipeline
 
 on:
+  push:
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
-  GROUP: mlops
-  WORKSPACE: mlops-ws
-  LOCATION: westeurope
-  MODEL_NAME: animal-classification
-  ACR_LOGIN: nimaacrregistry.azurecr.io
+  # ACR
+  ACR_LOGIN: ${{ secrets.ACR_LOGIN }}
+  ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+  ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+
+  # Image name
+  IMAGE_NAME: animal-inference
 
 jobs:
-  azure-pipeline:
-    runs-on: ubuntu-24.04
+
+  # ======================================================
+  # 1. TRAIN MODEL LOCALLY IN GITHUB ACTIONS
+  # ======================================================
+  train:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v2
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          python-version: "3.10"
 
-      - name: Azure ML Extension
-        run: az extension add -n ml -y
-
-      - name: Azure – Configure Defaults
-        run: az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
-
-      - name: Azure – Create Compute
-        run: az ml compute create --file environment/compute.yaml
-
-      - name: Azure – Start Compute (safe)
-        continue-on-error: true
+      - name: Install training dependencies
         run: |
-          STATE=$(az ml compute show --name cpu-cluster --query "state" -o tsv)
-          if [ "$STATE" = "Stopped" ]; then
-            az ml compute start --name cpu-cluster
-          else
-            echo "Compute already running"
-          fi
+          python -m pip install --upgrade pip
+          pip install pillow tensorflow scikit-learn
 
-      - name: Azure – Register Environments
+      - name: Run ML pipeline (dataprep → split → training)
         run: |
-          az ml environment create --file environment/pillow-env.yaml
-          az ml environment create --file environment/tensorflow-env.yaml
+          python components/dataprep/dataprep.py
+          python components/split/split.py
+          python components/training/training.py
 
-      - name: Azure – Register Components
-        run: |
-          az ml component create --file components/dataprep/dataprep.yaml
-          az ml component create --file components/split/ssplit.yaml
-          az ml component create --file components/training/training.yaml
+      - name: Upload trained model for next job
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-model
+          path: model_output/model.h5
 
-      - name: Azure – Run Training Pipeline
-        run: |
-          az ml job create \
-            --file pipelines/animals-pipeline.yaml \
-            --stream \
-            --set name=animals-pipeline-${{ github.sha }}-${{ github.run_id }}
-
-      - name: Azure – Stop Compute
-        continue-on-error: true
-        run: az ml compute stop --name cpu-cluster
-
-  download:
-    needs: azure-pipeline
-    runs-on: ubuntu-24.04
+  # ======================================================
+  # 2. BUILD & PUSH DOCKER IMAGE TO ACR
+  # ======================================================
+  build:
+    runs-on: ubuntu-latest
+    needs: train
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v2
+      - name: Download trained model
+        uses: actions/download-artifact@v4
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Azure ML Extension
-        run: az extension add -n ml -y
-
-      - name: Azure – Configure Defaults
-        run: az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
-
-      - name: Azure – Download Model
-        run: |
-          VERSION=$(az ml model list -n $MODEL_NAME --query "[0].version" -o tsv)
-          echo "Downloading model version $VERSION"
-          az ml model download \
-            --name $MODEL_NAME \
-            --version $VERSION \
-            --download-path model_output \
-            --overwrite
-
-      - name: Upload Inference Code
-        uses: actions/upload-artifact@v4.3.3
-        with:
-          name: inference-artifact
+          name: trained-model
           path: inference
 
+      - name: Login to ACR
+        run: |
+          echo $ACR_PASSWORD | docker login $ACR_LOGIN -u $ACR_USERNAME --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build -t $ACR_LOGIN/$IMAGE_NAME:latest inference
+
+      - name: Push Docker image
+        run: |
+          docker push $ACR_LOGIN/$IMAGE_NAME:latest
+
+  # ======================================================
+  # 3. DEPLOY TO AKS USING KUBECONFIG (NO AZ LOGIN)
+  # ======================================================
   deploy:
-    needs: download
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    needs: build
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Inference Artifact
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: inference-artifact
-          path: inference
-
-      - name: Docker – Meta
-        id: meta
-        uses: docker/metadata-action@v5.5.1
-        with:
-          images: |
-            ghcr.io/MahmoudAH97/mlops-animals-api
-          tags: |
-            type=ref,event=branch
-            type=sha
-
-      - name: GHCR Login
-        uses: docker/login-action@v3.2.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker Build + Push
-        uses: docker/build-push-action@v5.3.0
-        with:
-          context: ./inference
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-
-      - name: Kubernetes Deploy
+      - name: Install kubectl
         run: |
-          kubectl apply -f k8s/deployment.yaml
-          kubectl apply -f k8s/service.yaml
+          sudo apt-get update -y
+          sudo apt-get install -y kubectl
+
+      - name: Write kubeconfig
+        run: |
+          echo "${{ secrets.AKS_KUBECONFIG }}" > kubeconfig
+          chmod 600 kubeconfig
+
+      - name: Update deployment image
+        run: |
+          # Replace image name in deployment.yaml
+          sed -i "s|IMAGE_PLACEHOLDER|${{ env.ACR_LOGIN }}/${{ env.IMAGE_NAME }}:latest|g" k8s/deployment.yaml
+
+      - name: Apply Kubernetes manifests
+        run: |
+          KUBECONFIG=kubeconfig kubectl apply -f k8s/deployment.yaml
+          KUBECONFIG=kubeconfig kubectl apply -f k8s/service.yaml
+
+      - name: Verify Deployment
+        run: |
+          KUBECONFIG=kubeconfig kubectl get pods -o wide
+          KUBECONFIG=kubeconfig kubectl get svc -o wide
