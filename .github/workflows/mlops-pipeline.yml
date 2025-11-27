@@ -1,4 +1,4 @@
-name: MLOps End-to-End Pipeline
+name: MLOps End-to-End Pipeline (Debug Mode)
 
 on:
   push:
@@ -6,15 +6,15 @@ on:
   workflow_dispatch:
 
 env:
-  # ACR
+  # ACR credentials
   ACR_LOGIN: ${{ secrets.ACR_LOGIN }}
   ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
   ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
 
-  # Storage secret (connection string)
+  # Storage secret for dataset
   AZURE_BLOB_CONNECTION_STRING: ${{ secrets.AZURE_BLOB_CONNECTION_STRING }}
 
-  # Image name
+  # Docker image name
   IMAGE_NAME: animal-inference
 
 jobs:
@@ -26,60 +26,101 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ----------------------------------------
-      # Install Azure CLI (correct action)
-      # ----------------------------------------
-      - name: Install Azure CLI
-        uses: actions/azure-cli@v2
+      - name: Debug - Show repo structure
+        run: |
+          echo "=== REPO STRUCTURE ==="
+          ls -R .
 
-      # ----------------------------------------
+      # ---------------------------------------------------
+      # Install Azure CLI (CORRECT ACTION)
+      # ---------------------------------------------------
+      - name: Install Azure CLI
+        uses: azure/cli@v2
+
+      # ---------------------------------------------------
       # Download dataset from Azure Blob
-      # ----------------------------------------
+      # ---------------------------------------------------
       - name: Download dataset from Azure Blob
         env:
           AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_BLOB_CONNECTION_STRING }}
         run: |
+          echo "=== DOWNLOADING DATASET FROM AZURE BLOB ==="
+
           mkdir -p data/raw
-          echo "Downloading dataset from Azure Blob…"
 
           az storage blob download-batch \
             --destination data/raw \
             --source "azureml-blobstore-30bd3442-a52f-4ca1-b6b8-e34d75c41103/UI/2025-11-27_111021_UTC/animals" \
-            --connection-string "$AZURE_STORAGE_CONNECTION_STRING"
+            --connection-string "$AZURE_STORAGE_CONNECTION_STRING" \
+            --pattern *.jpg
 
-          echo "Download complete. Files:"
-          ls -R data/raw
+          echo "=== RAW DATASET ==="
+          ls -R data/raw || true
 
-      # ----------------------------------------
-      # Python setup + dependencies
-      # ----------------------------------------
-      - name: Set up Python
+          echo "=== VALIDATION: Ensure files exist ==="
+          FILE_COUNT=$(find data/raw -type f | wc -l)
+          echo "Files found: $FILE_COUNT"
+
+          if [ "$FILE_COUNT" -eq "0" ]; then
+            echo "ERROR: NO DATA DOWNLOADED. STOPPING."
+            exit 1
+          fi
+
+      # ---------------------------------------------------
+      # Setup Python
+      # ---------------------------------------------------
+      - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
 
       - name: Install training dependencies
         run: |
+          echo "=== INSTALLING PYTHON DEPENDENCIES ==="
           python -m pip install --upgrade pip
           pip install pillow tensorflow scikit-learn
 
-      # ----------------------------------------
-      # Run ML pipeline
-      # ----------------------------------------
-      - name: Run ML pipeline (dataprep → split → training)
+      # ---------------------------------------------------
+      # Run dataprep
+      # ---------------------------------------------------
+      - name: Run dataprep
         run: |
+          echo "=== RUNNING DATAPREP ==="
           python components/dataprep/dataprep.py \
             --data_folder data/raw \
             --output_folder data/processed
 
+          echo "=== PROCESSED DATA ==="
+          ls -R data/processed || true
+
+      # ---------------------------------------------------
+      # Run split
+      # ---------------------------------------------------
+      - name: Run split
+        run: |
+          echo "=== RUNNING SPLIT ==="
           python components/split/split.py \
             --input_folder data/processed \
             --train_folder data/split/train \
             --test_folder data/split/test \
             --ratio 0.8
+
+          echo "=== TRAIN FOLDER ==="
+          ls -R data/split/train || true
+
+          echo "=== TEST FOLDER ==="
+          ls -R data/split/test || true
+
+      # ---------------------------------------------------
+      # Run training
+      # ---------------------------------------------------
+      - name: Run training
+        run: |
+          echo "=== STARTING TRAINING ==="
 
           python components/training/training.py \
             --train_folder data/split/train \
@@ -87,17 +128,21 @@ jobs:
             --epochs 3 \
             --model_output model_output
 
-      # ----------------------------------------
-      # Upload trained model
-      # ----------------------------------------
-      - name: Upload trained model for next job
+          echo "=== MODEL OUTPUT FOLDER ==="
+          ls -R model_output || true
+
+      # ---------------------------------------------------
+      # Upload model
+      # ---------------------------------------------------
+      - name: Upload trained model
         uses: actions/upload-artifact@v4
         with:
           name: trained-model
           path: model_output/model.h5
 
+
   # ======================================================
-  # 2. BUILD & PUSH DOCKER IMAGE TO ACR
+  # 2. BUILD AND PUSH DOCKER IMAGE
   # ======================================================
   build:
     runs-on: ubuntu-latest
@@ -113,20 +158,28 @@ jobs:
           name: trained-model
           path: inference
 
+      - name: Debug inference directory
+        run: |
+          echo "=== INFERENCE DIRECTORY ==="
+          ls -R inference || true
+
       - name: Login to ACR
         run: |
           echo $ACR_PASSWORD | docker login $ACR_LOGIN -u $ACR_USERNAME --password-stdin
 
       - name: Build Docker image
         run: |
+          echo "=== BUILDING DOCKER IMAGE ==="
           docker build -t $ACR_LOGIN/$IMAGE_NAME:latest inference
 
       - name: Push Docker image
         run: |
+          echo "=== PUSHING DOCKER IMAGE ==="
           docker push $ACR_LOGIN/$IMAGE_NAME:latest
 
+
   # ======================================================
-  # 3. DEPLOY TO AKS USING KUBECONFIG
+  # 3. DEPLOY TO AKS
   # ======================================================
   deploy:
     runs-on: ubuntu-latest
@@ -145,17 +198,22 @@ jobs:
         run: |
           echo "${{ secrets.AKS_KUBECONFIG }}" > kubeconfig
           chmod 600 kubeconfig
+          echo "=== KUBECONFIG CREATED ==="
 
       - name: Update deployment image
         run: |
           sed -i "s|IMAGE_PLACEHOLDER|${{ env.ACR_LOGIN }}/${{ env.IMAGE_NAME }}:latest|g" k8s/deployment.yaml
 
-      - name: Apply Kubernetes manifests
+      - name: Apply manifests
         run: |
+          echo "=== APPLYING MANIFESTS ==="
           KUBECONFIG=kubeconfig kubectl apply -f k8s/deployment.yaml
           KUBECONFIG=kubeconfig kubectl apply -f k8s/service.yaml
 
-      - name: Verify Deployment
+      - name: Verify deployment
         run: |
+          echo "=== PODS ==="
           KUBECONFIG=kubeconfig kubectl get pods -o wide
+
+          echo "=== SERVICES ==="
           KUBECONFIG=kubeconfig kubectl get svc -o wide
